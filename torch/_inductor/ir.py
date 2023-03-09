@@ -15,7 +15,7 @@ from unittest.mock import patch
 import sympy
 from sympy import Expr, Integer
 
-import torch._dynamo.config as dynamo_config
+from torch._dynamo import config as dynamo_config
 import torch._logging
 
 import torch.fx

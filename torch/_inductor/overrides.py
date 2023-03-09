@@ -5,7 +5,7 @@ import weakref
 from typing import Optional
 
 import torch
-import torch._dynamo.config as dynamo_config
+from torch._dynamo import config as dynamo_config
 import torch.nn as nn
 from torch import _prims
 from torch._dynamo.utils import fake_mode_from_tensors

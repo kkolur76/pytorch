@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 import functorch
 from functorch.compile import min_cut_rematerialization_partition
 
-import torch._dynamo.config as dynamo_config
+from torch._dynamo import config as dynamo_config
 
 import torch.fx
 import torch.utils._pytree as pytree

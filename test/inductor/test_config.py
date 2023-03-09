@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-import torch._dynamo.config as dynamo_config
+from torch._dynamo import config as dynamo_config
 from torch._dynamo.test_case import run_tests, TestCase
 
 from torch._inductor import config

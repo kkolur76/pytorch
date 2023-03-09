@@ -6,7 +6,7 @@ import torch
 
 import torch._dynamo
 import torch._dynamo.backends.ipex
-import torch._dynamo.config as config
+from torch._dynamo import config
 import torch._dynamo.test_case
 from torch._dynamo.backends.ipex import has_ipex
 from torch._dynamo.testing import same
