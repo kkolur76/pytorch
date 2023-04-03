@@ -11,6 +11,7 @@ from .bytecode_transformation import (
     create_instruction,
     create_jump_absolute,
     Instruction,
+    InstructionExnTabEntry,
     transform_code_object,
     unique_id,
 )
@@ -67,6 +68,14 @@ class ReenterWith:
             setup_finally.append(
                 create_instruction("SETUP_FINALLY", target=except_jump_target)
             )
+        else:
+            exn_tab_begin = create_instruction("NOP")
+            exn_tab_end = create_instruction("NOP")
+            exn_tab_begin.exn_tab_entry = InstructionExnTabEntry(
+                exn_tab_begin, exn_tab_end, except_jump_target, self.stack_index, False
+            )
+            breakpoint()
+            setup_finally.append(exn_tab_begin)
 
         reset = [
             create_instruction("LOAD_FAST", argval=ctx_name),
@@ -85,7 +94,7 @@ class ReenterWith:
                 *reset,
                 create_instruction("END_FINALLY"),
             ]
-        else:
+        elif sys.version_info < (3, 11):
             epilogue = [
                 create_instruction("POP_BLOCK"),
                 *reset,
@@ -93,6 +102,20 @@ class ReenterWith:
                 except_jump_target,
                 *reset,
                 create_instruction("RERAISE"),
+                cleanup_complete_jump_target,
+            ]
+        else:
+            epilogue = [
+                exn_tab_end,
+                *reset,
+                create_instruction("JUMP_FORWARD", target=cleanup_complete_jump_target),
+                except_jump_target,
+                create_instruction("PUSH_EXC_INFO"),
+                *reset,
+                create_instruction("RERAISE", arg=0),
+                create_instruction("COPY", arg=3),
+                create_instruction("POP_EXCEPT"),
+                create_instruction("RERAISE", arg=1),
                 cleanup_complete_jump_target,
             ]
 
@@ -187,7 +210,9 @@ class ReenterWith:
                 cleanup_complete_jump_target,
             ] + cleanup
 
-            return create_call_function(0, False) + [
+            return [
+                *load_args,
+                *create_call_function(len(load_args), True),
                 create_instruction("BEFORE_WITH"),
                 create_instruction("POP_TOP"),
             ]
@@ -261,7 +286,6 @@ class ContinueExecutionCache:
             code_options["co_flags"] = code_options["co_flags"] & ~(
                 CO_VARARGS | CO_VARKEYWORDS
             )
-            # TODO probably need to update co_exceptiontable for python 3.11
             (target,) = [i for i in instructions if i.offset == offset]
 
             prefix = []
