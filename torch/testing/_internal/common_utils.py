@@ -991,6 +991,18 @@ def skipIfCrossRef(fn):
             fn(*args, **kwargs)
     return wrapper
 
+def expectedFailureIf(condition):
+    def decorator(fn):
+        if condition:
+            return unittest.expectedFailure(fn)
+        return fn
+    return decorator
+
+# Useful for "undoing" unittest.expectedFailure
+def expectedSuccess(test_item):
+    test_item.__unittest_expecting_failure__ = False
+    return test_item
+
 class CrossRefMode(torch.overrides.TorchFunctionMode):
     def __torch_function__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
