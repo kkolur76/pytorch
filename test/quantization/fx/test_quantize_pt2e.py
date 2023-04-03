@@ -25,6 +25,7 @@ from torch.ao.quantization.backend_config._qnnpack_pt2e import get_qnnpack_pt2e_
 from torch.ao.quantization.backend_config._x86_inductor_pt2e import get_x86_inductor_pt2e_backend_config
 from torch.ao.quantization.backend_config.x86 import get_x86_backend_config
 from torch.ao.quantization.quantize_fx import prepare_fx, convert_to_reference_fx, convert_fx
+fro mtorch.ao.quantizer import Quantizer
 from torch.ao.quantization._quantize_pt2e import prepare_pt2e, convert_pt2e
 from torch.ao.ns.fx.utils import (
     compute_sqnr,
@@ -132,6 +133,27 @@ class TestQuantizePT2E(QuantizationTestCase):
                 ns.call_function(torch.ops.aten.addmm.default),
             ]
             self.checkGraphModuleNodes(m, expected_node_list=node_list)
+
+    @xfailIfPython311
+    def test_simple_quantizer(self):
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.linear(x)
+
+        class BackendAQuantizer(Quantizer):
+            def annotate(model: torch.fx.GraphModule) -> torch.fx.GraphModule:
+                print("model:", model.graph)
+                for n in model.graph.nodes:
+                    pass
+
+        m = M().eval()
+        m = prepare_pt2e_quantizer(m, BackendAQuantizer())
+        m = convert_pt2e(m)
+
 
     @xfailIfPython311
     def test_rearrange_weight_observer_for_decomposed_linear(self):
