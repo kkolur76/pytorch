@@ -108,7 +108,7 @@ class PhiloxStateTracker:
         cls.bwd_state = PhiloxState()
 
     @staticmethod
-    def get_philox_rng_state():
+    def get_state_as_tuple():
         with disable_proxy_modes_tracing():
             with disable_fake_tensor_mode_tracing():
                 rng_state = torch.cuda.get_rng_state()

@@ -916,6 +916,8 @@ def fn_input_mutations_to_outputs(
     keep_data_input_mutations: bool,
 ) -> Any:
     def inner_fn(*args):
+        if config.functionalize_rng_ops:
+            PhiloxStateTracker.mark_beginning_of_forward()
         outs = fn(*args)
         assert len(meta.output_info) == len(outs)
         # The compiled fw will return mutated input tensors, *including* metadata-only mutation.
@@ -1025,7 +1027,8 @@ def create_joint(
     fn: Callable,
 ) -> Any:
     def inner_fn(primals: List[Any], tangents: List[Any]):
-        PhiloxStateTracker.mark_beginning_of_forward()
+        if config.functionalize_rng_ops:
+            PhiloxStateTracker.mark_beginning_of_forward()
         outs, tangent_mask = fn(*primals)
         assert len(tangent_mask) == len(outs)
         outs_to_grad = [o for needs_tangent, o in zip(tangent_mask, outs) if needs_tangent]
@@ -1057,7 +1060,8 @@ def create_joint(
 
         setup_stacktrace_preservation_hooks([out.grad_fn for out in needed_outs])
 
-        PhiloxStateTracker.mark_beginning_of_backward()
+        if config.functionalize_rng_ops:
+            PhiloxStateTracker.mark_beginning_of_backward()
         backward_out = []
         # Call the backwards pass
         if grad_primals:
@@ -1145,14 +1149,18 @@ def create_functionalized_graph(
 
     # Kinda annoying, but needed to make sure that the fx graph we trace out has "primals"
     # and "tangents" as its input names (which are special-cased by the partitioner)
-    def joint_helper(primals, tangents, fwd_seed, fwd_base_offset, bwd_seed, bwd_base_offset):
-        return functionalized_f_helper(primals, tangents, fwd_seed, fwd_base_offset, bwd_seed, bwd_base_offset)
+    def joint_helper(primals, tangents):
+        return functionalized_f_helper(primals, tangents)
 
-    def fwd_helper(*args, fwd_seed, fwd_base_offset):
-        return functionalized_f_helper(*args, fwd_seed, fwd_base_offset)
+    def fwd_helper(*args):
+        return functionalized_f_helper(*args)
+
+    helper = joint_helper if trace_joint else fwd_helper
+    if config.functionalize_rng_ops:
+        helper, args = create_functionalized_rng_ops_wrapper(helper, args, trace_joint)
 
     with enable_python_dispatcher():
-        return make_fx(joint_helper if trace_joint else fwd_helper, decomposition_table=aot_config.decompositions)(*args)
+        return make_fx(helper, decomposition_table=aot_config.decompositions)(*args)
 
 
 def normalize_as_list(x):
@@ -1292,6 +1300,9 @@ def aot_dispatch_base(flat_fn, flat_args: List[Tensor], aot_config: AOTConfig, *
 
     with context(), track_graph_compiling(aot_config, "inference"):
         compiler = aot_config.inference_compiler if aot_config.inference_compiler is not None else aot_config.fw_compiler
+        if config.functionalize_rng_ops:
+            seed, offset = PhiloxStateTracker.get_state_as_tuple()
+            flat_args = (seed, offset, *flat_args)
         compiled_fw = compiler(fw_module, flat_args)
 
     compiled_fn = create_runtime_wrapper(
@@ -1301,7 +1312,14 @@ def aot_dispatch_base(flat_fn, flat_args: List[Tensor], aot_config: AOTConfig, *
         keep_input_mutations=aot_config.keep_inference_input_mutations
     )
 
-    return compiled_fn
+    def wrapper(*args):
+        if config.functionalize_rng_ops:
+            seed, offset = PhiloxStateTracker.get_state_as_tuple()
+            return compiled_fn(seed, offset, *args)
+        else:
+            return compiled_fn(*args)
+
+    return wrapper
 
 
 # Returns the number of detected copy_
@@ -2286,25 +2304,29 @@ def create_functionalized_rng_ops_wrapper(func, args, trace_joint=True):
     def traced_joint(primals, tangents, fwd_seed, fwd_base_offset, bwd_seed, bwd_base_offset):
         with patch(torch.cuda, "get_rng_state", override_get_rng_state):
             with patch(torch.cuda, "set_rng_state", override_set_rng_state):
-                out =  func(primals, tangents)
-        return out
+                return func(primals, tangents)
 
-    def traced_forward(*primals, fwd_seed, fwd_base_offset):
+    # Annoying change in the calling convention where seed, offset is at the
+    # beginning becuse for tracing just forward to avoid seed, offset being
+    # keyword-only argumnents.
+    def traced_forward(fwd_seed, fwd_base_offset, *primals):
         with patch(torch.cuda, "get_rng_state", override_get_rng_state):
             with patch(torch.cuda, "set_rng_state", override_set_rng_state):
-                return func(primals)
+                return func(*primals)
 
     PhiloxStateTracker.reset()
-    # Get the current seed and offset to setup tracing.
-    fwd_seed, fwd_base_offset = PhiloxStateTracker.get_philox_rng_state()
-    bwd_seed, bwd_base_offset = PhiloxStateTracker.get_philox_rng_state()
-    PhiloxStateTracker.record_state(fwd_seed, fwd_base_offset, "forward")
-    PhiloxStateTracker.record_state(bwd_seed, bwd_base_offset, "backward")
 
     if trace_joint:
+        # Get the current seed and offset to setup tracing.
+        fwd_seed, fwd_base_offset = PhiloxStateTracker.get_state_as_tuple()
+        bwd_seed, bwd_base_offset = PhiloxStateTracker.get_state_as_tuple()
+        PhiloxStateTracker.record_state(fwd_seed, fwd_base_offset, "forward")
+        PhiloxStateTracker.record_state(bwd_seed, bwd_base_offset, "backward")
         return traced_joint, (*args, fwd_seed, fwd_base_offset, bwd_seed, bwd_base_offset)
     else:
-        return traced_forward, (*args, fwd_seed, fwd_base_offset)
+        fwd_seed, fwd_base_offset = PhiloxStateTracker.get_state_as_tuple()
+        PhiloxStateTracker.record_state(fwd_seed, fwd_base_offset, "forward")
+        return traced_forward, (fwd_seed, fwd_base_offset, *args)
 
 # Has the precondition that there
 # are no duplicate arguments in flat_args (e.g., the same Tensor
@@ -2328,10 +2350,6 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
         fw_metadata,
     )
     joint_fn_to_trace = create_joint(fn_prepared_for_autograd)
-
-
-    if config.functionalize_rng_ops:
-        joint_fn_to_trace, joint_inputs = create_functionalized_rng_ops_wrapper(joint_fn_to_trace, joint_inputs, trace_joint=True)
 
     disable_amp = torch._C._is_any_autocast_enabled()
 
@@ -2396,7 +2414,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
         def forward(ctx, *deduped_flat_tensor_args):
             args = deduped_flat_tensor_args
             if config.functionalize_rng_ops:
-                seed, offset = PhiloxStateTracker.get_philox_rng_state()
+                seed, offset = PhiloxStateTracker.get_state_as_tuple()
                 args = (*args, seed, offset)
             # There is a pretty complicated calling convention around what the compiled fw returns.
             # The full list of outputs and their relative order is:
@@ -2578,7 +2596,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
             )
 
             if config.functionalize_rng_ops:
-                seed, offset = PhiloxStateTracker.get_philox_rng_state()
+                seed, offset = PhiloxStateTracker.get_state_as_tuple()
                 all_args.append(seed)
                 all_args.append(offset)
             del contiguous_args

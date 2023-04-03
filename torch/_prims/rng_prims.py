@@ -15,7 +15,6 @@ def _philox_rand(
     device: _device,
     dtype: _dtype,
 ):
-    # FIXME - Need to add a nondeterministic_seeded tag to this op. Not sure how to do that yet.
     stride = tuple(stride)
     with torch.random.fork_rng(
         devices=[

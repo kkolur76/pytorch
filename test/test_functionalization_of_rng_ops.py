@@ -19,7 +19,7 @@ class TestFunctionalizationRngOps(TestCase):
             return a
 
         x = torch.rand(10, device=device, dtype=dtype)
-        
+
         for seed in range(10):
             torch.cuda.manual_seed(seed)
             ref = fn(x)
