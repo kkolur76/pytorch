@@ -1,9 +1,10 @@
+from typing import Tuple
+
 import torch
+import torch._decomp as decomp
 from torch import _prims
 from torch._subclasses.fake_tensor import disable_fake_tensor_mode_tracing
-from typing import Tuple
 from torch.types import _device, _dtype
-import torch._decomp as decomp
 
 
 def _philox_rand(
@@ -73,6 +74,3 @@ def register_rng_prims():
         tags=(torch.Tag.nondeterministic_seeded,),
         doc="",
     )
-
-
-    

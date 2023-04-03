@@ -1,21 +1,16 @@
 import torch
-from torch import _prims
-from torch.utils._python_dispatch import TorchDispatchMode
-from torch.fx.experimental.proxy_tensor import (
-    disable_proxy_modes_tracing,
-)
-from torch._subclasses.fake_tensor import disable_fake_tensor_mode_tracing
-from typing import Tuple
-from torch.types import _device, _dtype
 import torch._decomp as decomp
-from .._prims.rng_prims import philox_rand
+from torch._subclasses.fake_tensor import disable_fake_tensor_mode_tracing
+from torch.fx.experimental.proxy_tensor import disable_proxy_modes_tracing
 
 
 aten = torch.ops.aten
 rng_decompositions = {}
 
+
 def register_decomposition(aten_op):
     return decomp.register_decomposition(aten_op, rng_decompositions)
+
 
 def get_default_stride(size):
     """
@@ -46,15 +41,21 @@ def rand(shape, dtype=None, layout=torch.strided, device=None, pin_memory=False)
 
     # return out_grad * (1 - y * y).conj_physical()
 
+
 @register_decomposition(aten.rand_like)
-def rand_like(x: torch.Tensor, dtype=None, layout=None, device=None, pin_memory=False, memory_format=torch.preserve_format):
+def rand_like(
+    x: torch.Tensor,
+    dtype=None,
+    layout=None,
+    device=None,
+    pin_memory=False,
+    memory_format=torch.preserve_format,
+):
     seed, offset = PhiloxStateTracker.get_state()
     PhiloxStateTracker.advance_offset(x.numel())
     philox_rand = torch.ops.prims.philox_rand
     r = philox_rand(x.shape, seed, offset, x.stride(), x.device, x.dtype)
     return r
-
-
 
 
 class PhiloxState:
@@ -72,7 +73,6 @@ class PhiloxState:
     def advance_offset(self, consumed_offset):
         self.relative_offset += consumed_offset
 
-
     def set_state(self, seed, base_offset, relative_offset):
         self.seed = seed
         self.base_offset = base_offset
@@ -82,7 +82,6 @@ class PhiloxState:
         with disable_fake_tensor_mode_tracing():
             return (self.seed, self.base_offset + self.relative_offset)
 
-    
     def get_state_as_tensor(self):
         with disable_fake_tensor_mode_tracing():
             seed_portion = self.seed.reshape(1)
@@ -95,7 +94,7 @@ class PhiloxState:
             self.seed = seed[0]
             self.base = offset[0]
             self.relative_offset = 0
- 
+
 
 class PhiloxStateTracker:
     running_state = None
@@ -117,7 +116,6 @@ class PhiloxStateTracker:
                 offset = rng_state[808:].view(dtype=torch.int64)[0]
                 return seed, offset
 
-
     @classmethod
     def mark_beginning_of_forward(cls):
         cls.running_state = cls.fwd_state
@@ -134,7 +132,6 @@ class PhiloxStateTracker:
             assert mode == "backward"
             cls.bwd_state.set_state(seed, offset, 0)
 
-
     @classmethod
     def get_state_as_tensor(cls):
         return cls.running_state.get_state_as_tensor()
@@ -142,7 +139,7 @@ class PhiloxStateTracker:
     @classmethod
     def get_state(cls):
         return cls.running_state.get_state()
-    
+
     @classmethod
     def advance_torch_state_after_fwd(cls):
         print(f"forward total offset = {cls.fwd_state.relative_offset}")
@@ -152,7 +149,6 @@ class PhiloxStateTracker:
     def advance_torch_state_after_bwd(cls):
         print(f"backward total offset = {cls.bwd_state.relative_offset}")
         cls.advance_torch_state(cls.bwd_state.relative_offset)
-
 
     @classmethod
     def advance_torch_state(cls, offset):
@@ -176,7 +172,6 @@ class PhiloxStateTracker:
     @classmethod
     def advance_offset(cls, consumed_offset):
         cls.running_state.advance_offset(consumed_offset)
-
 
     @staticmethod
     def get_offset_jump(shape):
