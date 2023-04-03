@@ -194,7 +194,7 @@ def _all_reduce_coalesced(self, reduceOp, tag, ranks, group_size):
     group = c10d._find_or_create_pg_by_ranks_and_tag(tag, ranks, group_size)
     assert group is not None
 
-    inplace_tensor_list = list(map(lambda t: t.clone(memory_format=torch.contiguous_format), self))
+    inplace_tensor_list = [t.clone(memory_format=torch.contiguous_format) for t in self]
     work = dist.all_reduce_coalesced(inplace_tensor_list, op=op, group=group, async_op=True)
     _register_tensor_work(inplace_tensor_list[0], work)
 

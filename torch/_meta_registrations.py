@@ -3095,7 +3095,7 @@ def all_reduce_meta(self, reduceOp, tag, rankset, group_size):
 
 @register_meta(aten.all_reduce_coalesced)
 def all_reduce_coalesced_meta(self, reduceOp, tag, rankset, group_size):
-    return list(map(lambda t: torch.empty_like(t), self))
+    return [torch.empty_like(t) for t in self]
 
 
 @register_meta(aten.all_gather_into_tensor)
