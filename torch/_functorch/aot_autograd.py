@@ -26,8 +26,7 @@ from torch.fx.experimental.proxy_tensor import is_sym_node, py_sym_types
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.multiprocessing.reductions import StorageWeakRef
 from torch.nn.utils import stateless
-# from .functional_rng_ops import PhiloxRandomState, FunctionalizeRngOpsMode, rng_decompositions
-from torch._decomp.decompositions_for_rng import PhiloxRandomState, rng_decompositions
+from torch._decomp.decompositions_for_rng import PhiloxStateTracker, rng_decompositions
 from . import config
 from .partitioners import default_partition
 from torch._guards import TracingContext, DuplicateInputs, Source
@@ -1026,7 +1025,7 @@ def create_joint(
     fn: Callable,
 ) -> Any:
     def inner_fn(primals: List[Any], tangents: List[Any]):
-        PhiloxRandomState.mark_beginning_of_forward()
+        PhiloxStateTracker.mark_beginning_of_forward()
         outs, tangent_mask = fn(*primals)
         assert len(tangent_mask) == len(outs)
         outs_to_grad = [o for needs_tangent, o in zip(tangent_mask, outs) if needs_tangent]
@@ -1058,7 +1057,7 @@ def create_joint(
 
         setup_stacktrace_preservation_hooks([out.grad_fn for out in needed_outs])
 
-        PhiloxRandomState.mark_beginning_of_backward()
+        PhiloxStateTracker.mark_beginning_of_backward()
         backward_out = []
         # Call the backwards pass
         if grad_primals:
@@ -1070,7 +1069,6 @@ def create_joint(
                     allow_unused=True,
                 )
         backward_out_iter = iter(backward_out)
-        PhiloxRandomState.mark_end_of_backward()
         return outs, [
             next(backward_out_iter) if i else None for i in inputs_needs_grads
         ]
@@ -2277,37 +2275,31 @@ def create_functionalized_rng_ops_wrapper(func, args, trace_joint=True):
     # It goes from (primals, tangents) to (primals, tangents, seed, offset)
     # At runtime, we pass on the current seed and offset. This is hidden from
     # the user.
-
-    # Partitioner logic uses the string "primals" and "tangents"
-    # Even though example_seed is not used here, we will use it while
-    # functionalizing the rng ops in FunctionalizeRngOpsMode
     def override_get_rng_state(device: Union[int, str, torch.device] = 'cuda'):
-        out = PhiloxRandomState.get_current_args()
+        out = PhiloxStateTracker.get_state_as_tensor()
         return out
 
     def override_set_rng_state(x):
-        PhiloxRandomState.reset_current_args(x)
+        PhiloxStateTracker.set_state_from_tensor(x)
 
 
     def traced_joint(primals, tangents, fwd_seed, fwd_base_offset, bwd_seed, bwd_base_offset):
         with patch(torch.cuda, "get_rng_state", override_get_rng_state):
             with patch(torch.cuda, "set_rng_state", override_set_rng_state):
-                # with FunctionalizeRngOpsMode():
                 out =  func(primals, tangents)
         return out
 
     def traced_forward(*primals, fwd_seed, fwd_base_offset):
         with patch(torch.cuda, "get_rng_state", override_get_rng_state):
             with patch(torch.cuda, "set_rng_state", override_set_rng_state):
-                # with FunctionalizeRngOpsMode():
                 return func(primals)
 
-    PhiloxRandomState.reset()
+    PhiloxStateTracker.reset()
     # Get the current seed and offset to setup tracing.
-    fwd_seed, fwd_base_offset = PhiloxRandomState.get_current_seed_offset_scalar_tensors()
-    bwd_seed, bwd_base_offset = PhiloxRandomState.get_current_seed_offset_scalar_tensors()
-    PhiloxRandomState.record_rng_state_args(fwd_seed, fwd_base_offset, "forward")
-    PhiloxRandomState.record_rng_state_args(bwd_seed, bwd_base_offset, "backward")
+    fwd_seed, fwd_base_offset = PhiloxStateTracker.get_philox_rng_state()
+    bwd_seed, bwd_base_offset = PhiloxStateTracker.get_philox_rng_state()
+    PhiloxStateTracker.record_state(fwd_seed, fwd_base_offset, "forward")
+    PhiloxStateTracker.record_state(bwd_seed, bwd_base_offset, "backward")
 
     if trace_joint:
         return traced_joint, (*args, fwd_seed, fwd_base_offset, bwd_seed, bwd_base_offset)
@@ -2404,7 +2396,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
         def forward(ctx, *deduped_flat_tensor_args):
             args = deduped_flat_tensor_args
             if config.functionalize_rng_ops:
-                seed, offset = PhiloxRandomState.get_current_seed_offset_scalar_tensors()
+                seed, offset = PhiloxStateTracker.get_philox_rng_state()
                 args = (*args, seed, offset)
             # There is a pretty complicated calling convention around what the compiled fw returns.
             # The full list of outputs and their relative order is:
@@ -2507,7 +2499,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
             # to know the fwd and bwd offset, and it depends on where the partitioner
             # decided to make the cut.
             if config.functionalize_rng_ops:
-                PhiloxRandomState.advance_rng_state("forward")
+                PhiloxStateTracker.advance_torch_state_after_fwd()
             return tuple(raw_returns)
 
         @staticmethod
@@ -2586,7 +2578,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
             )
 
             if config.functionalize_rng_ops:
-                seed, offset = PhiloxRandomState.get_current_seed_offset_scalar_tensors()
+                seed, offset = PhiloxStateTracker.get_philox_rng_state()
                 all_args.append(seed)
                 all_args.append(offset)
             del contiguous_args
@@ -2625,7 +2617,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
                 # to know the fwd and bwd offset, and it depends on where the partitioner
                 # decided to make the cut.
                 if config.functionalize_rng_ops:
-                    PhiloxRandomState.advance_rng_state("backward")
+                    PhiloxStateTracker.advance_torch_state_after_bwd()
                 return tuple(out)
 
             if torch.is_grad_enabled() and any(t.requires_grad for t in all_args if isinstance(t, torch.Tensor)):

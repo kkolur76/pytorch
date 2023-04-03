@@ -14,16 +14,19 @@ def print_rng_seed_and_offset():
 
 def test_custom_object():
 
+    shape = (4,)
     class Custom(torch.autograd.Function):
         @staticmethod
         def forward(ctx, x):
             state = torch.cuda.get_rng_state()
             ctx.save_for_backward(x, state)
             # a = torch.rand_like(x) * torch.rand_like(x)
-            a = torch.rand(16, 32, 48, device="cuda") * torch.rand(48, device="cuda") * torch.sin(x)
+            # a = torch.rand(16, 32, 48, device="cuda") * torch.rand(48, device="cuda") * torch.sin(x)
+            a = torch.rand(*shape, device="cuda") * torch.rand(*shape, device="cuda") * torch.sin(x)
             torch.cuda.set_rng_state(state)
             # a = torch.rand_like(x) * torch.rand_like(x) * a
-            a = torch.rand(16, 32, 48, device="cuda") * torch.rand(16, 32, 48, device="cuda") * a
+            # a = torch.rand(16, 32, 48, device="cuda") * torch.rand(16, 32, 48, device="cuda") * a
+            a = torch.rand(*shape, device="cuda") * torch.rand(*shape, device="cuda") * a
             return a
 
         @staticmethod
@@ -36,7 +39,8 @@ def test_custom_object():
 
     custom = Custom.apply
 
-    x = torch.rand(16, 32, 48, device="cuda", requires_grad=True)
+    # x = torch.rand(16, 32, 48, device="cuda", requires_grad=True)
+    x = torch.rand(*shape, device="cuda", requires_grad=True)
     aot_custom = aot_function(custom, print_compile)
 
     # Both forward

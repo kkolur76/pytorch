@@ -17,31 +17,99 @@ rng_decompositions = {}
 def register_decomposition(aten_op):
     return decomp.register_decomposition(aten_op, rng_decompositions)
 
+def get_default_stride(size):
+    """
+    A helper function to get the strides for a contiguous tensor of a given
+    shape.
+    """
+    stride = [1] * len(size) + [1]
+    for idx in reversed(range(len(size))):
+        stride[idx] = stride[idx + 1] * size[idx]
+    stride = stride[1:]
+    return stride
 
 
-class PhiloxRandomState:
-    # These are the running seed and offset. We check them if rng state has been
-    # modified by the user and we need to adjust.
-    current_seed = -1
-    current_offset = -1
-    # This offset is used in the extracted AOT graph
-    relative_offset = 0
-    # These args are used by FunctionalizeRngOpsMode
-    seed_arg = None
-    base_offset_arg = None
+@register_decomposition(aten.rand)
+def rand(shape, dtype=None, layout=torch.strided, device=None, pin_memory=False):
+    device = device or "cpu"
+    seed, offset = PhiloxStateTracker.get_state()
 
-    accumulated_fwd_offset = 0
-    accumulated_bwd_offset = 0
-    accumulated_offset = 0
-    fwd_seed_arg = None
-    fwd_base_offset_arg = None
-    bwd_seed_arg = None
-    bwd_base_offset_arg = None
+    numel = 1
+    for dim_size in shape:
+        numel *= dim_size
+    PhiloxStateTracker.advance_offset(numel)
+    dtype = dtype or torch.float32
+    stride = get_default_stride(shape)
+    philox_rand = torch.ops.prims.philox_rand
+    r = philox_rand(shape, seed, offset, stride, device, dtype)
+    return r
+
+    # return out_grad * (1 - y * y).conj_physical()
+
+@register_decomposition(aten.rand_like)
+def rand_like(x: torch.Tensor, dtype=None, layout=None, device=None, pin_memory=False, memory_format=torch.preserve_format):
+    seed, offset = PhiloxStateTracker.get_state()
+    PhiloxStateTracker.advance_offset(x.numel())
+    philox_rand = torch.ops.prims.philox_rand
+    r = philox_rand(x.shape, seed, offset, x.stride(), x.device, x.dtype)
+    return r
 
 
+
+
+class PhiloxState:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.seed = None
+        self.base_offset = None
+        self.relative_offset = 0
+
+    def set_relative_offset(self, new_offset):
+        self.relative_offset = new_offset
+
+    def advance_offset(self, consumed_offset):
+        self.relative_offset += consumed_offset
+
+
+    def set_state(self, seed, base_offset, relative_offset):
+        self.seed = seed
+        self.base_offset = base_offset
+        self.relative_offset = relative_offset
+
+    def get_state(self):
+        with disable_fake_tensor_mode_tracing():
+            return (self.seed, self.base_offset + self.relative_offset)
+
+    
+    def get_state_as_tensor(self):
+        with disable_fake_tensor_mode_tracing():
+            seed_portion = self.seed.reshape(1)
+            offset_portion = (self.base_offset + self.relative_offset).reshape(1)
+            return torch.cat([seed_portion, offset_portion])
+
+    def set_state_from_tensor(self, state):
+        with disable_fake_tensor_mode_tracing():
+            seed, offset = torch.split(state, 1)
+            self.seed = seed[0]
+            self.base = offset[0]
+            self.relative_offset = 0
+ 
+
+class PhiloxStateTracker:
+    running_state = None
+    fwd_state = None
+    bwd_state = None
+
+    @classmethod
+    def reset(cls):
+        cls.running_state = PhiloxState()
+        cls.fwd_state = PhiloxState()
+        cls.bwd_state = PhiloxState()
 
     @staticmethod
-    def get_current_seed_offset_scalar_tensors():
+    def get_philox_rng_state():
         with disable_proxy_modes_tracing():
             with disable_fake_tensor_mode_tracing():
                 rng_state = torch.cuda.get_rng_state()
@@ -49,74 +117,66 @@ class PhiloxRandomState:
                 offset = rng_state[808:].view(dtype=torch.int64)[0]
                 return seed, offset
 
-    @classmethod
-    def advance_rng_state(cls, mode):
-        # with disable_proxy_modes_tracing():
-        #     with disable_fake_tensor_mode_tracing():
-        if mode == "forward":
-            accumulated_offset = cls.accumulated_fwd_offset
-        else:
-            assert mode == "backward"
-            accumulated_offset = cls.accumulated_bwd_offset
-        print(f"{mode}, total offset = {accumulated_offset}")
-        rng_state = torch.cuda.get_rng_state()
-        seed = rng_state[800:808].view(dtype=torch.int64)[0]
-        offset = rng_state[808:].view(dtype=torch.int64)[0]
-        new_offset = offset + accumulated_offset
-        torch.cuda.set_rng_state(cls.create_rng_state_tensor(seed, new_offset))
 
     @classmethod
     def mark_beginning_of_forward(cls):
-        cls.seed_arg = cls.fwd_seed_arg
-        cls.base_offset_arg = cls.fwd_base_offset_arg
-
-    @classmethod
-    def get_current_args(cls):
-        # with disable_proxy_modes_tracing():
-        with disable_fake_tensor_mode_tracing():
-            seed_portion = cls.seed_arg.reshape([1])
-            offset_portion = cls.base_offset_arg.reshape([1])
-            return torch.cat([seed_portion, offset_portion])
-        # return PhiloxRandomState.create_rng_state_tensor(cls.seed_arg, cls.base_offset_arg)
-
-    @classmethod
-    def reset_current_args(cls, x):
-        with disable_fake_tensor_mode_tracing():
-            seed, offset = torch.split(x, 1)
-            cls.seed_arg = seed[0]
-            cls.base_offset_arg = offset[0]
-            # seed_portion = cls.seed_arg.reshape([1]).view(torch.uint8)
-            # offset_portion = cls.base_offset_arg.reshape([1]).view(torch.uint8)
-            # return torch.cat([seed_portion, offset_portion])
+        cls.running_state = cls.fwd_state
 
     @classmethod
     def mark_beginning_of_backward(cls):
-        cls.accumulated_fwd_offset = cls.accumulated_offset
-        cls.accumulated_offset = 0
-        cls.seed_arg = cls.bwd_seed_arg
-        cls.base_offset_arg = cls.bwd_base_offset_arg
+        cls.running_state = cls.bwd_state
 
     @classmethod
-    def mark_end_of_backward(cls):
-        cls.accumulated_bwd_offset = cls.accumulated_offset
-
-    @classmethod
-    def record_rng_state_args(cls, seed, offset, mode):
+    def record_state(cls, seed, offset, mode):
         if mode == "forward":
-            cls.fwd_seed_arg = seed
-            cls.fwd_base_offset_arg = offset
+            cls.fwd_state.set_state(seed, offset, 0)
         else:
             assert mode == "backward"
-            cls.bwd_seed_arg = seed
-            cls.bwd_base_offset_arg = offset
+            cls.bwd_state.set_state(seed, offset, 0)
+
 
     @classmethod
-    def reset(cls):
-        cls.seed_arg = None
-        cls.base_offset_arg = None
-        cls.accumulated_offset = 0
-        cls.accumulated_fwd_offset = 0
-        cls.accumulated_bwd_offset = 0
+    def get_state_as_tensor(cls):
+        return cls.running_state.get_state_as_tensor()
+
+    @classmethod
+    def get_state(cls):
+        return cls.running_state.get_state()
+    
+    @classmethod
+    def advance_torch_state_after_fwd(cls):
+        print(f"forward total offset = {cls.fwd_state.relative_offset}")
+        cls.advance_torch_state(cls.fwd_state.relative_offset)
+
+    @classmethod
+    def advance_torch_state_after_bwd(cls):
+        print(f"backward total offset = {cls.bwd_state.relative_offset}")
+        cls.advance_torch_state(cls.bwd_state.relative_offset)
+
+
+    @classmethod
+    def advance_torch_state(cls, offset):
+        rng_state = torch.cuda.get_rng_state()
+        seed = rng_state[800:808].view(dtype=torch.int64)[0]
+        offset = rng_state[808:].view(dtype=torch.int64)[0]
+        new_offset = offset + offset
+        torch.cuda.set_rng_state(cls.create_rng_state_tensor(seed, new_offset))
+
+    @classmethod
+    def set_state_from_tensor(cls, x):
+        cls.running_state.set_state_from_tensor(x)
+
+    @staticmethod
+    def create_rng_state_tensor(seed, offset):
+        seed_portion = seed.reshape([1]).view(torch.uint8)
+        offset_portion = offset.reshape([1]).view(torch.uint8)
+        prefix = torch.tensor([-1] * 800, dtype=torch.uint8)
+        return torch.cat([prefix, seed_portion, offset_portion])
+
+    @classmethod
+    def advance_offset(cls, consumed_offset):
+        cls.running_state.advance_offset(consumed_offset)
+
 
     @staticmethod
     def get_offset_jump(shape):
@@ -130,9 +190,6 @@ class PhiloxRandomState:
         numel = 1
         for dim_size in shape:
             numel *= dim_size
-
-        # TODO - Some bug in the following code, so returning numel for now
-        return numel
 
         block_size = 256
         unroll = 4
@@ -151,51 +208,3 @@ class PhiloxRandomState:
         )
         print(numel, offset)
         return offset
-
-    @staticmethod
-    def create_rng_state_tensor(seed, offset):
-        seed_portion = seed.reshape([1]).view(torch.uint8)
-        offset_portion = offset.reshape([1]).view(torch.uint8)
-        prefix = torch.tensor([-1] * 800, dtype=torch.uint8)
-        return torch.cat([prefix, seed_portion, offset_portion])
-
-    @classmethod
-    def get_state_args(cls, shape):
-        with disable_proxy_modes_tracing():
-            with disable_fake_tensor_mode_tracing():
-                old_offset = cls.accumulated_offset
-                offset_jump = PhiloxRandomState.get_offset_jump(shape)
-                cls.accumulated_offset += offset_jump
-        return cls.seed_arg, torch.add(cls.base_offset_arg, old_offset)
-
-def get_default_stride(size):
-    """
-    A helper function to get the strides for a contiguous tensor of a given
-    shape.
-    """
-    stride = [1] * len(size) + [1]
-    for idx in reversed(range(len(size))):
-        stride[idx] = stride[idx + 1] * size[idx]
-    stride = stride[1:]
-    return stride
-
-
-
-@register_decomposition(aten.rand)
-def rand(shape, dtype=None, layout=torch.strided, device=None, pin_memory=False):
-    device = device or "cpu"
-    seed, offset = PhiloxRandomState.get_state_args(shape)
-    dtype = dtype or torch.float32
-    stride = get_default_stride(shape)
-    philox_rand = torch.ops.prims.philox_rand
-    r = philox_rand(shape, seed, offset, stride, device, dtype)
-    return r
-
-    # return out_grad * (1 - y * y).conj_physical()
-
-@register_decomposition(aten.rand_like)
-def rand_like(x: torch.Tensor, dtype=None, layout=None, device=None, pin_memory=False, memory_format=torch.preserve_format):
-    seed, offset = PhiloxRandomState.get_state_args(x.shape)
-    philox_rand = torch.ops.prims.philox_rand
-    r = philox_rand(x.shape, seed, offset, x.stride(), x.device, x.dtype)
-    return r

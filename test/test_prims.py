@@ -1094,6 +1094,44 @@ class TestPrims(TestCase):
         result_refs = refs.view(a, *new_shape)
         self.assertEqual(result_eager, result_refs)
 
+    @dtypes(torch.float32)
+    def test_philox_rand(self, device, dtype):
+        def test(seed, size, transform):
+            # Get reference
+            with torch.random.fork_rng():
+                torch.manual_seed(seed)
+                full = torch.rand(size, device=device, dtype=dtype)
+
+            # Take the subset of the reference
+            subset = transform(full)
+
+            # Compute the subset directly
+            new = torch.ops.prims.philox_rand(subset.size(), seed, subset.storage_offset(), subset.stride(), device, dtype)
+
+            # They should match
+            assert not (subset - new).abs().gt(0).any()
+
+        seed = 123
+        # Only narrow and select are allowed here!
+        # No permute!
+        # Maybe we could do permute but I don't think we need them
+        # and it would make the reference implementation a lot harder
+
+        # Some example subsets
+        test(seed, (10, 10, 10), lambda x: x[:5, :, :])
+        test(seed, (10, 10, 10), lambda x: x[:5, :, 0])
+        test(seed, (10, 10, 10), lambda x: x[:5, :, 1])
+        test(seed, (10, 10, 10), lambda x: x[1:6, :, :])
+        test(seed, (10, 10, 10), lambda x: x[:, :5, :])
+        test(seed, (10, 10, 10), lambda x: x[:, 1:6, :])
+        test(seed, (10, 10, 10), lambda x: x[:, 1:6, 1:6])
+        test(seed, (10, 10, 10), lambda x: x[:, 1:6, 1:6].unsqueeze(-1))
+
+        # Split the input in 4 along the first two dimensions
+        test(seed, (10, 10, 10), lambda x: x[:5, :5, :])
+        test(seed, (10, 10, 10), lambda x: x[:5, 5:, :])
+        test(seed, (10, 10, 10), lambda x: x[5:, :5, :])
+        test(seed, (10, 10, 10), lambda x: x[5:, 5:, :])
 
 class TestPrimsBasic(TestCase):
     def test_torch_ops(self):
