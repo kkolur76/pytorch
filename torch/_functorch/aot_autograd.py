@@ -26,7 +26,7 @@ from torch.fx.experimental.proxy_tensor import is_sym_node, py_sym_types
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.multiprocessing.reductions import StorageWeakRef
 from torch.nn.utils import stateless
-from torch._decomp.decompositions_for_rng import PhiloxStateTracker, rng_decompositions
+from torch._decomp.decompositions_for_rng import PhiloxStateTracker, rng_decompositions, RNGStateHelper
 from . import config
 from .partitioners import default_partition
 from torch._guards import TracingContext, DuplicateInputs, Source
@@ -1314,7 +1314,7 @@ def aot_dispatch_base(flat_fn, flat_args: List[Tensor], aot_config: AOTConfig, *
 
     def wrapper(*args):
         if config.functionalize_rng_ops:
-            seed, offset = PhiloxStateTracker.get_state_as_tuple()
+            seed, offset = RNGStateHelper.get_torch_state_as_tuple()
             return compiled_fn(seed, offset, *args)
         else:
             return compiled_fn(*args)
@@ -2318,13 +2318,13 @@ def create_functionalized_rng_ops_wrapper(func, args, trace_joint=True):
 
     if trace_joint:
         # Get the current seed and offset to setup tracing.
-        fwd_seed, fwd_base_offset = PhiloxStateTracker.get_state_as_tuple()
-        bwd_seed, bwd_base_offset = PhiloxStateTracker.get_state_as_tuple()
+        fwd_seed, fwd_base_offset = RNGStateHelper.get_torch_state_as_tuple()
+        bwd_seed, bwd_base_offset = RNGStateHelper.get_torch_state_as_tuple()
         PhiloxStateTracker.record_state(fwd_seed, fwd_base_offset, "forward")
         PhiloxStateTracker.record_state(bwd_seed, bwd_base_offset, "backward")
         return traced_joint, (*args, fwd_seed, fwd_base_offset, bwd_seed, bwd_base_offset)
     else:
-        fwd_seed, fwd_base_offset = PhiloxStateTracker.get_state_as_tuple()
+        fwd_seed, fwd_base_offset = RNGStateHelper.get_torch_state_as_tuple()
         PhiloxStateTracker.record_state(fwd_seed, fwd_base_offset, "forward")
         return traced_forward, (fwd_seed, fwd_base_offset, *args)
 
@@ -2414,7 +2414,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
         def forward(ctx, *deduped_flat_tensor_args):
             args = deduped_flat_tensor_args
             if config.functionalize_rng_ops:
-                seed, offset = PhiloxStateTracker.get_state_as_tuple()
+                seed, offset = RNGStateHelper.get_torch_state_as_tuple()
                 args = (*args, seed, offset)
             # There is a pretty complicated calling convention around what the compiled fw returns.
             # The full list of outputs and their relative order is:
@@ -2596,7 +2596,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
             )
 
             if config.functionalize_rng_ops:
-                seed, offset = PhiloxStateTracker.get_state_as_tuple()
+                seed, offset = TorchRngStateHelper.get_torch_rng_state_as_tuple()
                 all_args.append(seed)
                 all_args.append(offset)
             del contiguous_args

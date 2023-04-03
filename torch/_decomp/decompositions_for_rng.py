@@ -27,7 +27,7 @@ def get_default_stride(size):
 @register_decomposition(aten.rand)
 def rand(shape, dtype=None, layout=torch.strided, device=None, pin_memory=False):
     device = device or "cpu"
-    seed, offset = PhiloxStateTracker.get_state()
+    seed, offset = PhiloxStateTracker.get_state_as_tuple()
 
     numel = 1
     for dim_size in shape:
@@ -51,7 +51,7 @@ def rand_like(
     pin_memory=False,
     memory_format=torch.preserve_format,
 ):
-    seed, offset = PhiloxStateTracker.get_state()
+    seed, offset = PhiloxStateTracker.get_state_as_tuple()
     PhiloxStateTracker.advance_offset(x.numel())
     philox_rand = torch.ops.prims.philox_rand
     r = philox_rand(x.shape, seed, offset, x.stride(), x.device, x.dtype)
@@ -78,7 +78,7 @@ class PhiloxState:
         self.base_offset = base_offset
         self.relative_offset = relative_offset
 
-    def get_state(self):
+    def get_state_as_tuple(self):
         with disable_fake_tensor_mode_tracing():
             return (self.seed, self.base_offset + self.relative_offset)
 
@@ -107,15 +107,6 @@ class PhiloxStateTracker:
         cls.fwd_state = PhiloxState()
         cls.bwd_state = PhiloxState()
 
-    @staticmethod
-    def get_state_as_tuple():
-        with disable_proxy_modes_tracing():
-            with disable_fake_tensor_mode_tracing():
-                rng_state = torch.cuda.get_rng_state()
-                seed = rng_state[800:808].view(dtype=torch.int64)[0]
-                offset = rng_state[808:].view(dtype=torch.int64)[0]
-                return seed, offset
-
     @classmethod
     def mark_beginning_of_forward(cls):
         cls.running_state = cls.fwd_state
@@ -137,8 +128,8 @@ class PhiloxStateTracker:
         return cls.running_state.get_state_as_tensor()
 
     @classmethod
-    def get_state(cls):
-        return cls.running_state.get_state()
+    def get_state_as_tuple(cls):
+        return cls.running_state.get_state_as_tuple()
 
     @classmethod
     def advance_torch_state_after_fwd(cls):
@@ -203,3 +194,14 @@ class PhiloxStateTracker:
         )
         print(numel, offset)
         return offset
+
+
+class RNGStateHelper:
+    @staticmethod
+    def get_torch_state_as_tuple():
+        with disable_proxy_modes_tracing():
+            with disable_fake_tensor_mode_tracing():
+                rng_state = torch.cuda.get_rng_state()
+                seed = rng_state[800:808].view(dtype=torch.int64)[0]
+                offset = rng_state[808:].view(dtype=torch.int64)[0]
+                return seed, offset
