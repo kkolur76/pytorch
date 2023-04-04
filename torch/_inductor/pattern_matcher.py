@@ -629,17 +629,45 @@ if torch._C.has_mkldnn:
     mkldnn = torch.ops.mkldnn
     _conv_args = (Arg(), Arg(), Arg(), Arg(), Arg(), Arg(), Arg(), Arg(), Arg(), Arg())
     _linear_args = (Arg(), Arg(), Arg(), Arg(), Arg(), Arg())
+    _conv_transpose_args = (
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+    )
     _computation_user_1 = [
         CallFunction(mkldnn._convolution_pointwise.default, *_conv_args, _users=1),
         CallFunction(mkldnn._linear_pointwise.default, *_linear_args, _users=1),
+        CallFunction(
+            mkldnn._convolution_transpose_pointwise.default,
+            *_conv_transpose_args,
+            _users=1,
+        ),
     ]
     _computation_user_2 = [
         CallFunction(mkldnn._convolution_pointwise.default, *_conv_args, _users=2),
         CallFunction(mkldnn._linear_pointwise.default, *_linear_args, _users=2),
+        CallFunction(
+            mkldnn._convolution_transpose_pointwise.default,
+            *_conv_transpose_args,
+            _users=2,
+        ),
     ]
     _computation_user_4 = [
         CallFunction(mkldnn._convolution_pointwise.default, *_conv_args, _users=4),
         CallFunction(mkldnn._linear_pointwise.default, *_linear_args, _users=4),
+        CallFunction(
+            mkldnn._convolution_transpose_pointwise.default,
+            *_conv_transpose_args,
+            _users=4,
+        ),
     ]
 
     def gelu_fusion_1(computation_call):
@@ -784,6 +812,16 @@ if torch._C.has_mkldnn:
             return False
         return True
 
+    def is_single_conv_transpose(match):
+        conv_nodes = filter_nodes(
+            match.nodes, mkldnn._convolution_transpose_pointwise.default
+        )
+        if len(conv_nodes) < 1:
+            return False
+        if any(n.args[-3] != "none" for n in conv_nodes):
+            return False
+        return True
+
     def register_mkldnn_conv_replacement_pattern(unary_op, pattern):
         @register_replacement_pattern(pattern, extra_check=is_single_conv)
         def fn(input, weight, bias, padding, stride, dilation, groups, *args, **kwargs):
@@ -816,9 +854,40 @@ if torch._C.has_mkldnn:
 
         return fn
 
+    def register_mkldnn_conv_transpose_replacement_pattern(unary_op, pattern):
+        @register_replacement_pattern(pattern, extra_check=is_single_conv_transpose)
+        def fn(
+            input,
+            weight,
+            bias,
+            padding,
+            output_padding,
+            stride,
+            dilation,
+            groups,
+            *args,
+            **kwargs,
+        ):
+            return torch.ops.mkldnn._convolution_transpose_pointwise(
+                input,
+                weight,
+                bias,
+                padding,
+                output_padding,
+                stride,
+                dilation,
+                groups,
+                unary_op.op_name,
+                unary_op.scalars_attr,
+                unary_op.algorithm_attr,
+            )
+
+        return fn
+
     for unary_op, patterns in replacement_unary_fusion_patterns.items():
         register_mkldnn_conv_replacement_pattern(unary_op, patterns[0])
         register_mkldnn_linear_replacement_pattern(unary_op, patterns[1])
+        register_mkldnn_conv_transpose_replacement_pattern(unary_op, patterns[2])
 
     def register_leaky_relu_fusion_lowering(computation_call, computation_op):
         @register_lowering_pattern(leaky_relu_fusion(computation_call))
@@ -891,6 +960,19 @@ if torch._C.has_mkldnn:
         Arg(),
     )
     _linear_kwargs = (Arg(), Arg(), Arg(), KeywordArg("unary_attr"), Arg(), Arg)
+    _conv_transpose_kwargs = (
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        Arg(),
+        KeywordArg("unary_attr"),
+        Arg(),
+        Arg(),
+    )
     _leaky_relu_user = {
         CallFunction(
             mkldnn._convolution_pointwise.default, *_conv_kwargs, _users=3
@@ -898,6 +980,11 @@ if torch._C.has_mkldnn:
         CallFunction(
             mkldnn._linear_pointwise.default, *_linear_kwargs, _users=3
         ): torch.ops.mkldnn._linear_pointwise.default,
+        CallFunction(
+            mkldnn._convolution_transpose_pointwise.default,
+            *_conv_transpose_kwargs,
+            _users=3,
+        ): torch.ops.mkldnn._convolution_transpose_pointwise.default,
     }
     _hardtanh_user = {
         CallFunction(
@@ -906,6 +993,11 @@ if torch._C.has_mkldnn:
         CallFunction(
             mkldnn._linear_pointwise.default, *_linear_kwargs, _users=1
         ): torch.ops.mkldnn._linear_pointwise.default,
+        CallFunction(
+            mkldnn._convolution_transpose_pointwise.default,
+            *_conv_transpose_kwargs,
+            _users=1,
+        ): torch.ops.mkldnn._convolution_transpose_pointwise.default,
     }
     for _computation_call in _leaky_relu_user.items():
         register_leaky_relu_fusion_lowering(_computation_call[0], _computation_call[1])
