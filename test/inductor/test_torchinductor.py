@@ -1669,6 +1669,13 @@ class CommonTemplate:
             check_lowp=False,
         )
 
+    def test_scalar_input(self):
+        def fn(x, y):
+            a = torch.div(x, y, rounding_mode="floor")
+            return a
+
+        self.common(fn, [torch.randint(5, (1, 8)), 5400])
+
     def test_shape_prop_torch_ones(self):
         class Model(torch.nn.Module):
             def forward(self, attention_scores):
@@ -6089,6 +6096,21 @@ if HAS_CPU and not torch.backends.mps.is_available():
             fn(x2, y)
             fn_compiled([x3, y])
             assert same(x2, x3)
+
+        def test_int_div(self):
+            def fn(x, y):
+                s3 = x.size(1)
+                a = torch.zeros((1 + s3) // 2)
+                a += y
+                return a, s3
+
+            p0 = torch.randint(5, (1, 8))
+            p1 = torch.randn(1)
+            opt_fn = torch._dynamo.optimize("inductor")(fn)
+            opt_fn(p0, p1)
+            real_out = fn(p0, p1)
+            compiled_out = opt_fn(p0, p1)
+            assert same(real_out, compiled_out)
 
         def test_no_op_squeeze(self):
             @torch._dynamo.optimize("inductor")

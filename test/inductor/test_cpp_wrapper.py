@@ -1,6 +1,7 @@
 # Owner(s): ["module: inductor"]
 import sys
 import unittest
+from typing import NamedTuple
 
 import torch._dynamo
 from torch._inductor import config
@@ -18,16 +19,19 @@ except unittest.SkipTest:
     raise
 
 
-class TestCppWrapper(TorchTestCase):
+class CppWrapperTemplate:
     pass
 
 
-def make_test_case(name, device="cpu"):
-    test_name = f"{name}_{device}"
+class TestCppWrapper(TorchTestCase):
+    device = "cpu"
+
+
+def make_test_case(name, device, tests):
+    test_name = f"{name}_{device}" if device else name
 
     @config.patch(cpp_wrapper=True, search_autotune_cache=False)
     def fn(self):
-        tests = test_torchinductor.CpuTests()
         tests.setUpClass()
         tests.setUp()
         try:
@@ -40,28 +44,39 @@ def make_test_case(name, device="cpu"):
             tests.tearDownClass()
 
     fn.__name__ = test_name
-    setattr(TestCppWrapper, test_name, fn)
+    setattr(CppWrapperTemplate, test_name, fn)
 
 
-for name in [
-    "test_as_strided",  # buffer reuse
-    "test_bitwise",  # int32
-    "test_bmm1",
-    "test_bmm2",
-    "test_cat",  # alias
-    "test_linear1",
-    "test_linear2",
-    "test_lowmem_dropout1",  # None as output
-    "test_mm_views",
-    "test_profiler_mark_wrapper_call",
-    "test_reduction1",  # Reduction
-    "test_relu",  # multiple inputs
-    "test_silu",  # single input, single output
-    "test_sum_dtype",  # float64
-    "test_sum_int",  # bool, int64, int8, uint8
-    "test_transpose",  # multiple outputs, buffer clear
+class BaseTest(NamedTuple):
+    name: str
+    device: str = "cpu"
+    tests: TorchTestCase = test_torchinductor.CpuTests()
+
+
+for item in [
+    BaseTest("test_as_strided"),  # buffer reuse
+    BaseTest("test_bitwise"),  # int32
+    BaseTest("test_bmm1"),
+    BaseTest("test_bmm2"),
+    BaseTest("test_cat"),  # alias
+    BaseTest("test_int_div", "", test_torchinductor.CPUReproTests()),
+    BaseTest("test_linear1"),
+    BaseTest("test_linear2"),
+    BaseTest("test_lowmem_dropout1"),  # None as output
+    BaseTest("test_mm_views"),
+    BaseTest("test_profiler_mark_wrapper_call"),
+    BaseTest("test_reduction1"),  # Reduction
+    BaseTest("test_relu"),  # multiple inputs
+    BaseTest("test_scalar_input"),
+    BaseTest("test_silu"),  # single input, single output
+    BaseTest("test_sum_dtype"),  # float64
+    BaseTest("test_sum_int"),  # bool, int64, int8, uint8
+    BaseTest("test_transpose"),  # multiple outputs, buffer clear
 ]:
-    make_test_case(name)
+    make_test_case(item.name, item.device, item.tests)
+
+
+test_torchinductor.copy_tests(CppWrapperTemplate, TestCppWrapper, "cpp_wrapper")
 
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests
