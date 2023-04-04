@@ -246,7 +246,7 @@ class ConvBinary2d(nn.Conv2d):
         return self._conv_forward(input, other, self.weight, self.bias)
 
 
-class PackedLinear(nn.Linear):
+class PackedLinearFP32(nn.Linear):
     def __init__(self, linear: nn.Module, input_size: list):
         super().__init__(
             linear.in_features,
@@ -274,8 +274,8 @@ class PackedLinear(nn.Linear):
         return y
 
 
-class LinearUnary(nn.Linear):
-    def __init__(self, linear: nn.Module, unary: Optional[nn.Module], input_size: list):
+class PackedLinearBF16(nn.Linear):
+    def __init__(self, linear: nn.Module, input_size: list):
         super().__init__(
             linear.in_features,
             linear.out_features,
@@ -283,17 +283,10 @@ class LinearUnary(nn.Linear):
             linear.weight.device,
             linear.weight.dtype,
         )
-        self._update_module_params(linear, unary, input_size)
+        self._update_module_params(linear, input_size)
 
-    def _update_module_params(self, linear, unary, input_size):
+    def _update_module_params(self, linear, input_size):
         self.__dict__ = copy.deepcopy(linear.__dict__)
-        self.attr = "none"
-        self.scalars = []
-        self.algorithm = ""
-        if unary is not None:
-            self.attr, self.scalars, self.algorithm = unary_modules_map[
-                unary.__class__
-            ](unary)
         self.batch_size = reduce(lambda x, y: x * y, input_size[:-1])
         self.packed_weight = torch.nn.Parameter(
             torch.ops.mkldnn._reorder_linear_weight(
@@ -307,9 +300,9 @@ class LinearUnary(nn.Linear):
             input,
             self.packed_weight,
             self.bias,
-            self.attr,
-            self.scalars,
-            self.algorithm,
+            "none",
+            [],
+            "",
         )
         return y
 
@@ -463,13 +456,8 @@ def fused_conv_binary_unary_eval(
 def packed_linear_eval(linear: nn.Module, input_size: list):
     assert not (linear.training), "Fusion only for eval!"
     if linear.weight.dtype == torch.bfloat16:
-        return LinearUnary(linear, None, input_size)
-    return PackedLinear(linear, input_size)
-
-
-def fused_linear_unary_eval(linear: nn.Module, unary: nn.Module, input_size: list):
-    assert not (linear.training), "Fusion only for eval!"
-    return LinearUnary(linear, unary, input_size)
+        return PackedLinearBF16(linear, input_size)
+    return PackedLinearFP32(linear, input_size)
 
 
 def fused_linear_binary_eval(linear: nn.Module, attr: str, input_size: list):
@@ -775,7 +763,6 @@ def pack_module(gm: torch.fx.GraphModule):
 
 
 computation_op_unary_op_fusion_map = {
-    nn.Linear: fused_linear_unary_eval,
     ConvBinary2d: fused_conv_binary_unary_eval,
     nn.ConvTranspose2d: fused_conv_transpose_unary_eval,
 }
